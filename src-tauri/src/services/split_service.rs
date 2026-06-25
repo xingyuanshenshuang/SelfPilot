@@ -1,7 +1,7 @@
 use chrono::NaiveDate;
 use uuid::Uuid;
 
-use crate::db::models::{Goal, Task};
+use crate::db::models::{Goal, ReplanPreview, ReplanPreviewItem, Task};
 use crate::error::{AppError, AppResult};
 
 /// 自动拆解目标为每日任务
@@ -73,6 +73,140 @@ pub fn split_goal_into_tasks(goal: &Goal, today: NaiveDate) -> AppResult<Vec<Tas
     }
 
     Ok(tasks)
+}
+
+/// 计算重新规划的预览
+///
+/// PRD §4.2 模块四 & 分阶段计划 Sprint 2：
+/// - 将目标下所有未完成任务（不含已跳过）按新的剩余天数重新平均分配
+/// - 保留 is_manual=true 的任务计划数量不变
+/// - 排除已跳过任务
+///
+/// 参数：
+/// - goal: 目标
+/// - unfinished_tasks: 未完成任务（调用方已过滤 skipped 和 done）
+/// - manual_tasks: 手动修改过的任务（is_manual=1），这些将被保留
+/// - today: 今天日期
+pub fn build_replan_preview(
+    goal: &Goal,
+    unfinished_tasks: &[Task],
+    today: NaiveDate,
+) -> AppResult<ReplanPreview> {
+    let deadline_str = goal.deadline.as_ref().ok_or_else(|| {
+        AppError::Param("目标未设置截止日期，无法重新规划".into())
+    })?;
+    let deadline = NaiveDate::parse_from_str(deadline_str, "%Y-%m-%d")
+        .map_err(|e| AppError::Param(format!("截止日期格式错误: {}", e)))?;
+
+    let remaining_days = (deadline - today).num_days();
+    if remaining_days < 1 {
+        return Err(AppError::Business(format!(
+            "截止日期剩余天数不足（{}天），至少需要留出1天",
+            remaining_days
+        )));
+    }
+
+    // 待重新分配的任务：未完成且非手动修改
+    let to_replan: Vec<&Task> = unfinished_tasks
+        .iter()
+        .filter(|t| t.is_manual == 0)
+        .collect();
+
+    // 手动修改的任务保留原计划数量
+    let manual: Vec<&Task> = unfinished_tasks
+        .iter()
+        .filter(|t| t.is_manual == 1)
+        .collect();
+
+    // 剩余待分配总量 = 目标总量 - 已完成量 - 手动任务的计划量
+    let completed_qty: f64 = 0.0; // 已完成任务不在 unfinished_tasks 中
+    let manual_plan_sum: f64 = manual.iter().map(|t| t.plan_qty).sum();
+    let remaining_qty = goal.total_qty - completed_qty - manual_plan_sum;
+
+    if remaining_qty < 0.0 {
+        return Err(AppError::Business(format!(
+            "剩余待分配总量为负({})，可能已完成量超过目标总量，无法重新规划",
+            remaining_qty
+        )));
+    }
+
+    // 待重新分配的任务数量（决定分配到几天）
+    let replan_days = to_replan.len() as i64;
+    if replan_days == 0 {
+        // 没有需要重新分配的任务
+        let items = unfinished_tasks
+            .iter()
+            .map(|t| ReplanPreviewItem {
+                task_id: t.id.clone(),
+                name: t.name.clone(),
+                plan_date: t.plan_date.clone().unwrap_or_default(),
+                old_plan_qty: t.plan_qty,
+                new_plan_qty: t.plan_qty,
+                retained: t.is_manual == 1,
+            })
+            .collect();
+        return Ok(ReplanPreview {
+            goal_id: goal.id.clone(),
+            goal_name: goal.name.clone(),
+            remaining_days,
+            remaining_qty,
+            daily_base: 0.0,
+            remainder: 0,
+            items,
+        });
+    }
+
+    // 平均分配：base = floor(remaining_qty / replan_days)，余数分到前几天
+    let daily_base = (remaining_qty / replan_days as f64).floor();
+    let remainder = (remaining_qty - daily_base * replan_days as f64).round() as i64;
+
+    // 构建预览项
+    let mut items: Vec<ReplanPreviewItem> = Vec::new();
+
+    // 手动任务：保留
+    for t in &manual {
+        items.push(ReplanPreviewItem {
+            task_id: t.id.clone(),
+            name: t.name.clone(),
+            plan_date: t.plan_date.clone().unwrap_or_default(),
+            old_plan_qty: t.plan_qty,
+            new_plan_qty: t.plan_qty,
+            retained: true,
+        });
+    }
+
+    // 待重新分配任务：按 sort_order 排序后分配新数量
+    let mut replan_sorted = to_replan.clone();
+    replan_sorted.sort_by_key(|t| t.sort_order);
+
+    for (i, t) in replan_sorted.iter().enumerate() {
+        let new_qty = if (i as i64) < remainder {
+            daily_base + 1.0
+        } else {
+            daily_base
+        };
+        items.push(ReplanPreviewItem {
+            task_id: t.id.clone(),
+            name: t.name.clone(),
+            plan_date: t.plan_date.clone().unwrap_or_default(),
+            old_plan_qty: t.plan_qty,
+            new_plan_qty: new_qty,
+            retained: false,
+        });
+    }
+
+    // 按 plan_date 排序输出
+    items.sort_by(|a, b| a.plan_date.cmp(&b.plan_date));
+
+    Ok(ReplanPreview {
+        goal_id: goal.id.clone(),
+        goal_name: goal.name.clone(),
+        remaining_days,
+        remaining_qty,
+        daily_base,
+        remainder,
+        items,
+    })
 }
 
 #[cfg(test)]

@@ -45,16 +45,48 @@ pub fn run() {
             commands::goal::get_goal,
             commands::goal::delete_goal,
             commands::goal::auto_split,
+            commands::goal::replan_preview,
+            commands::goal::replan_goal,
+            // 阶段相关
+            commands::stage::create_stage,
+            commands::stage::list_stages,
+            commands::stage::update_stage,
+            commands::stage::delete_stage,
             // 任务相关
             commands::task::create_task,
             commands::task::complete_task,
             commands::task::skip_task,
+            commands::task::backfill_task,
+            commands::task::move_task,
+            commands::task::update_task_plan_qty,
+            commands::task::delete_task,
             commands::task::list_today_tasks,
             commands::task::list_overdue_tasks,
             commands::task::list_tasks_by_goal,
+            commands::task::list_tasks_by_date_range,
             // 进度相关
             commands::progress::get_goal_progress,
             commands::progress::get_all_goals_progress,
+            // 统计相关
+            commands::stats::get_completion_trend,
+            commands::stats::get_goal_completion_stats,
+            commands::stats::get_heatmap,
+            commands::stats::get_completion_predictions,
+            // 鼓励语相关
+            commands::encouragement::list_encouragements,
+            commands::encouragement::add_encouragement,
+            commands::encouragement::delete_encouragement,
+            commands::encouragement::random_encouragement,
+            commands::encouragement::random_encouragement_by_streak,
+            commands::encouragement::random_celebration_encouragement,
+            commands::encouragement::get_streak,
+            // 设置相关
+            commands::settings::get_all_settings,
+            commands::settings::get_setting,
+            commands::settings::set_setting,
+            // 备份相关
+            commands::backup::export_data,
+            commands::backup::import_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

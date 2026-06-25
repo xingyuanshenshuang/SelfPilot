@@ -1,5 +1,35 @@
 use serde::{Deserialize, Serialize};
 
+/// 任务状态枚举
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStatus {
+    Pending,
+    Partial,
+    Done,
+    Skipped,
+}
+
+impl TaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskStatus::Pending => "pending",
+            TaskStatus::Partial => "partial",
+            TaskStatus::Done => "done",
+            TaskStatus::Skipped => "skipped",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(TaskStatus::Pending),
+            "partial" => Some(TaskStatus::Partial),
+            "done" => Some(TaskStatus::Done),
+            "skipped" => Some(TaskStatus::Skipped),
+            _ => None,
+        }
+    }
+}
+
 /// 目标（一级节点）
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Goal {
@@ -30,6 +60,46 @@ pub struct Stage {
     pub path: String,
     pub sort_order: i64,
     pub created_at: String,
+}
+
+/// 创建阶段的输入参数
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateStageInput {
+    pub goal_id: String,
+    pub name: String,
+    pub parent_id: Option<String>,
+}
+
+/// 更新阶段的输入参数
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateStageInput {
+    pub id: String,
+    pub name: Option<String>,
+    pub sort_order: Option<i64>,
+}
+
+/// 删除阶段时子任务的处理方式
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeleteStageInput {
+    pub id: String,
+    /// "detach" 子任务转为独立任务；"cascade" 级联删除子任务
+    pub mode: String,
+}
+
+/// 阶段带进度信息
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct StageWithProgress {
+    pub id: String,
+    pub goal_id: String,
+    pub name: String,
+    pub parent_id: Option<String>,
+    pub path: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub total_plan: f64,
+    pub total_actual: f64,
+    pub percentage: f64,
+    pub task_count: i64,
 }
 
 /// 任务（三级节点，实际执行单元）
@@ -97,32 +167,237 @@ pub struct TodayTask {
     pub source: String,
 }
 
-/// 任务状态枚举
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskStatus {
-    Pending,
-    Partial,
-    Done,
-    Skipped,
+/// 重新规划预览项：展示某任务变更前后的计划数量
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplanPreviewItem {
+    pub task_id: String,
+    pub name: String,
+    pub plan_date: String,
+    pub old_plan_qty: f64,
+    pub new_plan_qty: f64,
+    /// 是否被保留（手动修改的任务）
+    pub retained: bool,
 }
 
-impl TaskStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            TaskStatus::Pending => "pending",
-            TaskStatus::Partial => "partial",
-            TaskStatus::Done => "done",
-            TaskStatus::Skipped => "skipped",
-        }
-    }
+/// 重新规划预览结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplanPreview {
+    pub goal_id: String,
+    pub goal_name: String,
+    pub remaining_days: i64,
+    pub remaining_qty: f64,
+    /// 每日新计划数量（基础值）
+    pub daily_base: f64,
+    /// 余数（分到前几天）
+    pub remainder: i64,
+    pub items: Vec<ReplanPreviewItem>,
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "pending" => Some(TaskStatus::Pending),
-            "partial" => Some(TaskStatus::Partial),
-            "done" => Some(TaskStatus::Done),
-            "skipped" => Some(TaskStatus::Skipped),
-            _ => None,
-        }
-    }
+/// 重新规划执行结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplanResult {
+    pub goal_id: String,
+    pub updated_count: usize,
+    pub retained_count: usize,
+    pub tasks: Vec<Task>,
+}
+
+/// 移动任务到阶段
+#[derive(Debug, Clone, Deserialize)]
+pub struct MoveTaskInput {
+    pub task_id: String,
+    pub stage_id: Option<String>,
+}
+
+/// 日历视图任务（带目标名称和逾期标记）
+///
+/// PRD §4.2 模块五 & 分阶段计划 Sprint 3：
+/// 用于日历视图按日期范围查询，附带目标名称与逾期状态
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CalendarTask {
+    pub id: String,
+    pub goal_id: String,
+    pub goal_name: String,
+    pub stage_id: Option<String>,
+    pub name: String,
+    pub plan_date: Option<String>,
+    pub plan_qty: f64,
+    pub actual_qty: f64,
+    pub unit: String,
+    pub status: String,
+    pub source: String,
+    /// 是否逾期（plan_date < today 且未完成），由命令层填充
+    pub is_overdue: bool,
+}
+
+/// 每日完成趋势项
+///
+/// PRD §4.2 模块六：近7天/30天完成任务数量趋势
+/// - 数量型任务按完成数量统计（actual_qty 截断到 plan_qty）
+/// - 布尔型任务计 1（status=done）
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct DailyTrend {
+    /// 日期 yyyy-MM-dd
+    pub date: String,
+    /// 当日完成任务数（数量型按完成数量计，布尔型计1，已跳过不计）
+    pub completed_qty: f64,
+    /// 当日完成任务条数（status=done 的任务数）
+    pub completed_count: i64,
+}
+
+/// 目标完成统计（用于柱状图）
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct GoalCompletionStat {
+    pub id: String,
+    pub name: String,
+    pub total_plan: f64,
+    pub total_actual: f64,
+    /// 完成百分比 0.0 ~ 1.0
+    pub percentage: f64,
+    /// 任务总数（不含跳过）
+    pub task_count: i64,
+    /// 已完成任务数
+    pub done_count: i64,
+}
+
+/// 鼓励语
+///
+/// PRD §4.2 模块七 & 分阶段计划 Sprint 4 / Sprint 5：
+/// - category: "preset" 预设 / "custom" 用户自定义
+/// - level: 鼓励语等级（Sprint 5 个性化规则）
+///   - "normal" 普通（1天）
+///   - "advanced" 进阶（3天）
+///   - "highlight" 高亮（7天）
+///   - "celebration" 庆祝（全部完成）
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Encouragement {
+    pub id: String,
+    pub text: String,
+    /// preset | custom
+    pub category: String,
+    /// normal | advanced | highlight | celebration
+    pub level: String,
+    pub created_at: String,
+}
+
+/// 添加鼓励语输入
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddEncouragementInput {
+    pub text: String,
+    /// 可选等级，默认 "normal"
+    pub level: Option<String>,
+}
+
+/// 设置项（key-value）
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Setting {
+    pub key: String,
+    pub value: String,
+}
+
+/// 设置项输入
+#[derive(Debug, Clone, Deserialize)]
+pub struct SetSettingInput {
+    pub key: String,
+    pub value: String,
+}
+
+/// 连续完成天数统计
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreakInfo {
+    /// 当前连续天数
+    pub current_streak: i64,
+    /// 历史最长连续天数
+    pub longest_streak: i64,
+    /// 今日是否已完成至少一个任务
+    pub completed_today: bool,
+}
+
+/// 导出数据（完整备份）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportData {
+    pub version: String,
+    pub exported_at: String,
+    pub goals: Vec<Goal>,
+    pub stages: Vec<Stage>,
+    pub tasks: Vec<Task>,
+    pub encouragements: Vec<Encouragement>,
+    pub settings: Vec<Setting>,
+}
+
+/// 导入数据输入
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImportInput {
+    /// JSON 字符串
+    pub data: String,
+    /// 冲突处理模式：skip | overwrite | rename
+    pub conflict_mode: String,
+}
+
+/// 导入数据结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportResult {
+    pub goals_imported: usize,
+    pub goals_skipped: usize,
+    pub stages_imported: usize,
+    pub stages_skipped: usize,
+    pub tasks_imported: usize,
+    pub tasks_skipped: usize,
+    pub encouragements_imported: usize,
+    pub settings_imported: usize,
+}
+
+/// 热力图单元格
+///
+/// PRD §4.2 模块六 & 分阶段计划 Sprint 5：
+/// 按日期格子颜色深浅展示每日"完成任务量 / 当日应有任务总量"的比例
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct HeatmapCell {
+    /// 日期 yyyy-MM-dd
+    pub date: String,
+    /// 当日计划任务总量（不含跳过）
+    pub plan_qty: f64,
+    /// 当日完成量（数量型按 actual_qty 截断到 plan_qty，布尔型 done 计 1）
+    pub completed_qty: f64,
+    /// 当日任务总数（不含跳过）
+    pub task_count: i64,
+    /// 当日已完成任务数（status=done）
+    pub done_count: i64,
+    /// 完成率 0.0 ~ 1.0（completed_qty / plan_qty，plan_qty=0 时为 0）
+    pub completion_rate: f64,
+}
+
+/// 完成预测状态
+///
+/// PRD §4.2 模块六 & 分阶段计划 Sprint 6：
+/// - on_track：按期完成（预测日期 <= deadline）
+/// - ahead：可提前完成（预测日期 < deadline - 1天）
+/// - need_speed：需提高速度（预测日期 > deadline）
+/// - no_deadline：未设置截止日期
+/// - no_data：无历史完成数据，无法预测
+/// - completed：已全部完成
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionPrediction {
+    pub goal_id: String,
+    pub goal_name: String,
+    /// 截止日期（可能为空）
+    pub deadline: Option<String>,
+    /// 目标总量
+    pub total_qty: f64,
+    /// 已完成量
+    pub completed_qty: f64,
+    /// 剩余量
+    pub remaining_qty: f64,
+    /// 过去7天平均每日完成量
+    pub avg_daily_speed: f64,
+    /// 预测还需天数（remaining_qty / avg_daily_speed，无数据时为 null）
+    pub predicted_days: Option<i64>,
+    /// 预测完成日期（today + predicted_days，无数据时为 null）
+    pub predicted_date: Option<String>,
+    /// 距截止日期剩余天数（负数表示已逾期）
+    pub days_to_deadline: Option<i64>,
+    /// 预测状态：on_track | ahead | need_speed | no_deadline | no_data | completed
+    pub status: String,
+    /// 建议文案
+    pub suggestion: String,
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, defineAsyncComponent } from "vue";
+import { ref, computed, watch, onMounted, defineAsyncComponent } from "vue";
 import {
   NLayout,
   NLayoutSider,
@@ -9,14 +9,21 @@ import {
   NDialogProvider,
   NConfigProvider,
   NScrollbar,
+  NModal,
+  NButton,
+  NSpace,
   darkTheme,
 } from "naive-ui";
 import type { MenuOption } from "naive-ui";
 import { Icon } from "@iconify/vue";
 import { h } from "vue";
+import { useSettingStore } from "@/stores/settingStore";
+import { useTaskStore } from "@/stores/taskStore";
 
 const activeView = ref<string>("dashboard");
-const isDark = ref(false);
+
+const settingStore = useSettingStore();
+const taskStore = useTaskStore();
 
 const DashboardView = defineAsyncComponent(
   () => import("./views/DashboardView.vue"),
@@ -24,6 +31,21 @@ const DashboardView = defineAsyncComponent(
 const GoalTreeView = defineAsyncComponent(
   () => import("./views/GoalTreeView.vue"),
 );
+const CalendarView = defineAsyncComponent(
+  () => import("./views/CalendarView.vue"),
+);
+const StatsView = defineAsyncComponent(() => import("./views/StatsView.vue"));
+const EncouragementView = defineAsyncComponent(
+  () => import("./views/EncouragementView.vue"),
+);
+const SettingsView = defineAsyncComponent(
+  () => import("./views/SettingsView.vue"),
+);
+
+// 启动时从后端加载主题设置
+onMounted(async () => {
+  await settingStore.loadTheme();
+});
 
 const menuOptions: MenuOption[] = [
   {
@@ -40,25 +62,21 @@ const menuOptions: MenuOption[] = [
     label: "日历视图",
     key: "calendar",
     icon: () => h(Icon, { icon: "mdi:calendar-month-outline" }),
-    disabled: true,
   },
   {
     label: "数据统计",
     key: "stats",
     icon: () => h(Icon, { icon: "mdi:chart-line" }),
-    disabled: true,
   },
   {
     label: "鼓励语库",
     key: "encouragement",
     icon: () => h(Icon, { icon: "mdi:emoticon-happy-outline" }),
-    disabled: true,
   },
   {
     label: "设置",
     key: "settings",
     icon: () => h(Icon, { icon: "mdi:cog-outline" }),
-    disabled: true,
   },
 ];
 
@@ -68,14 +86,59 @@ const currentView = computed(() => {
       return DashboardView;
     case "goalTree":
       return GoalTreeView;
+    case "calendar":
+      return CalendarView;
+    case "stats":
+      return StatsView;
+    case "encouragement":
+      return EncouragementView;
+    case "settings":
+      return SettingsView;
     default:
       return null;
   }
 });
+
+// PRD §4.2 模块七 & Sprint 5：完成当日首个任务后弹出鼓励语弹窗
+// Sprint 5：支持等级触发（1/3/7天 + 全部完成庆祝）
+const showEncouragementModal = ref(false);
+
+watch(
+  () => taskStore.pendingEncouragement,
+  (enc) => {
+    if (enc) {
+      showEncouragementModal.value = true;
+    }
+  },
+);
+
+function closeEncouragementModal() {
+  showEncouragementModal.value = false;
+  taskStore.clearPendingEncouragement();
+}
+
+const themeProvider = computed(() => (settingStore.isDark ? darkTheme : null));
+
+/** 鼓励语弹窗标题（庆祝 vs 普通） */
+const encouragementTitle = computed(() =>
+  taskStore.isCelebration ? "全部目标完成！" : "今日首完成！",
+);
+const encouragementIcon = computed(() =>
+  taskStore.isCelebration ? "mdi:trophy-award" : "mdi:star-four-points",
+);
+const encouragementHeaderColor = computed(() =>
+  taskStore.isCelebration ? "text-orange-500" : "text-brand-600",
+);
+const encouragementBodyIcon = computed(() =>
+  taskStore.isCelebration ? "mdi:trophy" : "mdi:emoticon-excited-outline",
+);
+const encouragementBodyColor = computed(() =>
+  taskStore.isCelebration ? "text-yellow-500" : "text-orange-400",
+);
 </script>
 
 <template>
-  <n-config-provider :theme="isDark ? darkTheme : null">
+  <n-config-provider :theme="themeProvider">
     <n-message-provider>
       <n-dialog-provider>
         <n-layout has-sider class="h-screen">
@@ -119,6 +182,43 @@ const currentView = computed(() => {
             </n-layout-content>
           </n-layout>
         </n-layout>
+
+        <!-- 完成首任务鼓励语弹窗 -->
+        <NModal
+          :show="showEncouragementModal"
+          preset="card"
+          :bordered="false"
+          style="width: 420px"
+          :mask-closable="true"
+          @update:show="(v: boolean) => !v && closeEncouragementModal()"
+        >
+          <template #header>
+            <div
+              class="flex items-center gap-2"
+              :class="encouragementHeaderColor"
+            >
+              <Icon :icon="encouragementIcon" width="22" />
+              <span>{{ encouragementTitle }}</span>
+            </div>
+          </template>
+          <div class="py-4 text-center">
+            <Icon
+              :icon="encouragementBodyIcon"
+              width="48"
+              :class="[encouragementBodyColor, 'mx-auto mb-3']"
+            />
+            <div class="text-base text-gray-700 px-4 leading-relaxed">
+              {{ taskStore.pendingEncouragement?.text }}
+            </div>
+          </div>
+          <template #footer>
+            <NSpace justify="center">
+              <NButton type="primary" @click="closeEncouragementModal">
+                {{ taskStore.isCelebration ? "感谢陪伴" : "继续加油" }}
+              </NButton>
+            </NSpace>
+          </template>
+        </NModal>
       </n-dialog-provider>
     </n-message-provider>
   </n-config-provider>

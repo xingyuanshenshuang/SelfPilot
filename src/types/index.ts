@@ -73,6 +73,79 @@ export interface TodayTask {
 
 export type TaskStatus = "pending" | "partial" | "done" | "skipped";
 
+/** 阶段（二级节点） */
+export interface Stage {
+  id: string;
+  goal_id: string;
+  name: string;
+  parent_id: string | null;
+  path: string;
+  sort_order: number;
+  created_at: string;
+}
+
+/** 阶段带进度信息 */
+export interface StageWithProgress extends Stage {
+  total_plan: number;
+  total_actual: number;
+  /** 完成百分比 0.0 ~ 1.0 */
+  percentage: number;
+  task_count: number;
+}
+
+export interface CreateStageInput {
+  goal_id: string;
+  name: string;
+  parent_id?: string | null;
+}
+
+export interface UpdateStageInput {
+  id: string;
+  name?: string;
+  sort_order?: number;
+}
+
+export interface DeleteStageInput {
+  id: string;
+  /** "detach" 子任务转独立 | "cascade" 级联删除 */
+  mode: "detach" | "cascade";
+}
+
+export interface MoveTaskInput {
+  task_id: string;
+  stage_id: string | null;
+}
+
+/** 重新规划预览项 */
+export interface ReplanPreviewItem {
+  task_id: string;
+  name: string;
+  plan_date: string;
+  old_plan_qty: number;
+  new_plan_qty: number;
+  /** 是否被保留（手动修改的任务） */
+  retained: boolean;
+}
+
+/** 重新规划预览结果 */
+export interface ReplanPreview {
+  goal_id: string;
+  goal_name: string;
+  remaining_days: number;
+  remaining_qty: number;
+  daily_base: number;
+  remainder: number;
+  items: ReplanPreviewItem[];
+}
+
+/** 重新规划执行结果 */
+export interface ReplanResult {
+  goal_id: string;
+  updated_count: number;
+  retained_count: number;
+  tasks: Task[];
+}
+
 /** 任务状态对应的显示信息 */
 export const STATUS_META: Record<
   TaskStatus,
@@ -95,3 +168,174 @@ export const STATUS_META: Record<
     color: "#909399",
   },
 };
+
+/** 日历视图任务（带目标名称和逾期标记） */
+export interface CalendarTask {
+  id: string;
+  goal_id: string;
+  goal_name: string;
+  stage_id: string | null;
+  name: string;
+  plan_date: string | null;
+  plan_qty: number;
+  actual_qty: number;
+  unit: string;
+  status: TaskStatus;
+  source: "auto" | "manual";
+  /** 是否逾期（plan_date < today 且未完成） */
+  is_overdue: boolean;
+}
+
+/** 每日完成趋势项 */
+export interface DailyTrend {
+  /** 日期 yyyy-MM-dd */
+  date: string;
+  /** 当日完成数量（数量型按 actual_qty 截断到 plan_qty，布尔型 done 计 1） */
+  completed_qty: number;
+  /** 当日 done 任务条数 */
+  completed_count: number;
+}
+
+/** 目标完成统计（柱状图） */
+export interface GoalCompletionStat {
+  id: string;
+  name: string;
+  total_plan: number;
+  total_actual: number;
+  /** 完成百分比 0.0 ~ 1.0 */
+  percentage: number;
+  /** 任务总数（不含跳过） */
+  task_count: number;
+  /** 已完成任务数 */
+  done_count: number;
+}
+
+/** 鼓励语等级 */
+export type EncouragementLevel =
+  | "normal" // 普通（1天）
+  | "advanced" // 进阶（3天）
+  | "highlight" // 高亮（7天）
+  | "celebration"; // 庆祝（全部完成）
+
+/** 鼓励语 */
+export interface Encouragement {
+  id: string;
+  text: string;
+  /** preset 预设 | custom 用户自定义 */
+  category: "preset" | "custom";
+  /** 鼓励语等级 */
+  level: EncouragementLevel;
+  created_at: string;
+}
+
+/** 添加鼓励语输入 */
+export interface AddEncouragementInput {
+  text: string;
+  /** 可选等级，默认 "normal" */
+  level?: EncouragementLevel;
+}
+
+/** 设置项（key-value） */
+export interface Setting {
+  key: string;
+  value: string;
+}
+
+/** 设置项输入 */
+export interface SetSettingInput {
+  key: string;
+  value: string;
+}
+
+/** 连续完成天数统计 */
+export interface StreakInfo {
+  /** 当前连续天数 */
+  current_streak: number;
+  /** 历史最长连续天数 */
+  longest_streak: number;
+  /** 今日是否已完成至少一个任务 */
+  completed_today: boolean;
+}
+
+/** 导出数据（完整备份） */
+export interface ExportData {
+  version: string;
+  exported_at: string;
+  goals: Goal[];
+  stages: Stage[];
+  tasks: Task[];
+  encouragements: Encouragement[];
+  settings: Setting[];
+}
+
+/** 导入冲突处理模式 */
+export type ImportConflictMode = "skip" | "overwrite" | "rename";
+
+/** 导入数据输入 */
+export interface ImportInput {
+  data: string;
+  conflict_mode: ImportConflictMode;
+}
+
+/** 导入数据结果 */
+export interface ImportResult {
+  goals_imported: number;
+  goals_skipped: number;
+  stages_imported: number;
+  stages_skipped: number;
+  tasks_imported: number;
+  tasks_skipped: number;
+  encouragements_imported: number;
+  settings_imported: number;
+}
+
+/** 热力图单元格 */
+export interface HeatmapCell {
+  /** 日期 yyyy-MM-dd */
+  date: string;
+  /** 当日计划任务总量（不含跳过） */
+  plan_qty: number;
+  /** 当日完成量 */
+  completed_qty: number;
+  /** 当日任务总数（不含跳过） */
+  task_count: number;
+  /** 当日已完成任务数 */
+  done_count: number;
+  /** 完成率 0.0 ~ 1.0 */
+  completion_rate: number;
+}
+
+/** 完成预测状态 */
+export type PredictionStatus =
+  | "on_track" // 按期完成
+  | "ahead" // 可提前完成
+  | "need_speed" // 需提高速度
+  | "no_deadline" // 未设置截止日期
+  | "no_data" // 无历史完成数据
+  | "completed"; // 已全部完成
+
+/** 完成预测 */
+export interface CompletionPrediction {
+  goal_id: string;
+  goal_name: string;
+  /** 截止日期（可能为空） */
+  deadline: string | null;
+  /** 目标总量 */
+  total_qty: number;
+  /** 已完成量 */
+  completed_qty: number;
+  /** 剩余量 */
+  remaining_qty: number;
+  /** 过去7天平均每日完成量 */
+  avg_daily_speed: number;
+  /** 预测还需天数（无数据时为 null） */
+  predicted_days: number | null;
+  /** 预测完成日期（无数据时为 null） */
+  predicted_date: string | null;
+  /** 距截止日期剩余天数（负数表示已逾期） */
+  days_to_deadline: number | null;
+  /** 预测状态 */
+  status: PredictionStatus;
+  /** 建议文案 */
+  suggestion: string;
+}

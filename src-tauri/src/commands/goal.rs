@@ -1,7 +1,7 @@
 use tauri::State;
 use uuid::Uuid;
 
-use crate::db::models::{CreateGoalInput, Goal, Task};
+use crate::db::models::{CreateGoalInput, Goal, ReplanPreview, ReplanResult, Task};
 use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
 use crate::services::split_service;
@@ -120,4 +120,88 @@ pub async fn auto_split(goal_id: String, state: State<'_, DbPool>) -> AppResult<
     }
 
     Ok(tasks)
+}
+
+/// 重新规划预览
+///
+/// PRD §4.2 模块四 & 分阶段计划 Sprint 2：
+/// 展示重新规划前后各任务计划数量变化，供用户确认
+#[tauri::command]
+pub async fn replan_preview(goal_id: String, state: State<'_, DbPool>) -> AppResult<ReplanPreview> {
+    let goal: Goal = sqlx::query_as("SELECT * FROM goals WHERE id = ?")
+        .bind(&goal_id)
+        .fetch_optional(&state.0)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("目标 {} 不存在", goal_id)))?;
+
+    // 查询未完成任务（排除 done 和 skipped）
+    let unfinished: Vec<Task> = sqlx::query_as(
+        "SELECT * FROM tasks WHERE goal_id = ? AND status IN ('pending', 'partial') ORDER BY sort_order",
+    )
+    .bind(&goal_id)
+    .fetch_all(&state.0)
+    .await?;
+
+    let today = chrono::Local::now().date_naive();
+    let preview = split_service::build_replan_preview(&goal, &unfinished, today)?;
+
+    Ok(preview)
+}
+
+/// 执行重新规划
+///
+/// 根据预览结果更新未完成任务（非手动）的计划数量
+/// - 排除已跳过任务
+/// - 保留 is_manual=true 的任务计划数量
+#[tauri::command]
+pub async fn replan_goal(goal_id: String, state: State<'_, DbPool>) -> AppResult<ReplanResult> {
+    let goal: Goal = sqlx::query_as("SELECT * FROM goals WHERE id = ?")
+        .bind(&goal_id)
+        .fetch_optional(&state.0)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("目标 {} 不存在", goal_id)))?;
+
+    // 查询未完成任务（排除 done 和 skipped）
+    let unfinished: Vec<Task> = sqlx::query_as(
+        "SELECT * FROM tasks WHERE goal_id = ? AND status IN ('pending', 'partial') ORDER BY sort_order",
+    )
+    .bind(&goal_id)
+    .fetch_all(&state.0)
+    .await?;
+
+    let today = chrono::Local::now().date_naive();
+    let preview = split_service::build_replan_preview(&goal, &unfinished, today)?;
+
+    // 执行更新：只更新非手动任务的 plan_qty
+    let mut updated_count = 0usize;
+    let mut retained_count = 0usize;
+
+    for item in &preview.items {
+        if item.retained {
+            retained_count += 1;
+            continue;
+        }
+
+        sqlx::query("UPDATE tasks SET plan_qty = ? WHERE id = ?")
+            .bind(item.new_plan_qty)
+            .bind(&item.task_id)
+            .execute(&state.0)
+            .await?;
+        updated_count += 1;
+    }
+
+    // 查询更新后的任务列表
+    let updated_tasks: Vec<Task> = sqlx::query_as(
+        "SELECT * FROM tasks WHERE goal_id = ? AND status IN ('pending', 'partial') ORDER BY plan_date, sort_order",
+    )
+    .bind(&goal_id)
+    .fetch_all(&state.0)
+    .await?;
+
+    Ok(ReplanResult {
+        goal_id: goal_id.clone(),
+        updated_count,
+        retained_count,
+        tasks: updated_tasks,
+    })
 }

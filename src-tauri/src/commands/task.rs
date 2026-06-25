@@ -1,7 +1,7 @@
 use tauri::State;
 use uuid::Uuid;
 
-use crate::db::models::{CompleteTaskInput, CreateTaskInput, Task, TodayTask};
+use crate::db::models::{CalendarTask, CompleteTaskInput, CreateTaskInput, MoveTaskInput, Task, TodayTask};
 use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
 
@@ -179,6 +179,171 @@ pub async fn list_tasks_by_goal(
     .bind(&goal_id)
     .fetch_all(&state.0)
     .await?;
+
+    Ok(tasks)
+}
+
+/// 补完成（历史任务）
+///
+/// PRD §4.2 模块四 & 分阶段计划 Sprint 2：
+/// - 对已跳过/逾期的历史任务补录实际完成量
+/// - 只更新 actual_qty 和状态，不触发任何重新分配算法
+/// - 允许对 skipped 状态的任务补完成（区别于 complete_task 禁止 done 重复标记）
+/// - 补完成后不联动未来任务
+#[tauri::command]
+pub async fn backfill_task(
+    input: CompleteTaskInput,
+    state: State<'_, DbPool>,
+) -> AppResult<Task> {
+    if input.actual_qty < 0.0 {
+        return Err(AppError::Param("实际完成量不能为负".into()));
+    }
+
+    let task: Task = sqlx::query_as("SELECT * FROM tasks WHERE id = ?")
+        .bind(&input.task_id)
+        .fetch_optional(&state.0)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("任务 {} 不存在", input.task_id)))?;
+
+    // 已完成且补完成量不超过原完成量时禁止重复标记
+    if task.status == "done" && input.actual_qty <= task.actual_qty {
+        return Err(AppError::Business("任务已完成，不能重复补录".into()));
+    }
+
+    // 补完成允许超过原计划数量（用户可能补录超额完成）
+    let new_actual = input.actual_qty;
+
+    // 计算新状态（补完成可以把 skipped/pending 变为 partial/done）
+    let new_status = if new_actual >= task.plan_qty && task.plan_qty > 0.0 {
+        "done"
+    } else if new_actual > 0.0 {
+        "partial"
+    } else {
+        "pending"
+    };
+
+    // 只更新 actual_qty 和 status，绝不触碰 plan_qty 或其他任务的计划数量
+    sqlx::query("UPDATE tasks SET actual_qty = ?, status = ? WHERE id = ?")
+        .bind(new_actual)
+        .bind(new_status)
+        .bind(&input.task_id)
+        .execute(&state.0)
+        .await?;
+
+    let updated: Task = sqlx::query_as("SELECT * FROM tasks WHERE id = ?")
+        .bind(&input.task_id)
+        .fetch_one(&state.0)
+        .await?;
+
+    Ok(updated)
+}
+
+/// 移动任务到指定阶段（或移出阶段）
+#[tauri::command]
+pub async fn move_task(input: MoveTaskInput, state: State<'_, DbPool>) -> AppResult<Task> {
+    let task: Task = sqlx::query_as("SELECT * FROM tasks WHERE id = ?")
+        .bind(&input.task_id)
+        .fetch_optional(&state.0)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("任务 {} 不存在", input.task_id)))?;
+
+    // 更新 stage_id 和 path
+    let new_path = match &input.stage_id {
+        Some(stage_id) => format!("/{}/{}/{}", task.goal_id, stage_id, input.task_id),
+        None => format!("/{}/{}", task.goal_id, input.task_id),
+    };
+
+    sqlx::query("UPDATE tasks SET stage_id = ?, path = ? WHERE id = ?")
+        .bind(&input.stage_id)
+        .bind(&new_path)
+        .bind(&input.task_id)
+        .execute(&state.0)
+        .await?;
+
+    let updated: Task = sqlx::query_as("SELECT * FROM tasks WHERE id = ?")
+        .bind(&input.task_id)
+        .fetch_one(&state.0)
+        .await?;
+
+    Ok(updated)
+}
+
+/// 更新任务的计划数量（手动调整单日计划）
+///
+/// 设置 is_manual = 1，重新规划时会保留手动修改项
+#[tauri::command]
+pub async fn update_task_plan_qty(
+    task_id: String,
+    plan_qty: f64,
+    state: State<'_, DbPool>,
+) -> AppResult<Task> {
+    if plan_qty < 0.0 {
+        return Err(AppError::Param("计划数量不能为负".into()));
+    }
+
+    sqlx::query("UPDATE tasks SET plan_qty = ?, is_manual = 1 WHERE id = ?")
+        .bind(plan_qty)
+        .bind(&task_id)
+        .execute(&state.0)
+        .await?;
+
+    let updated: Task = sqlx::query_as("SELECT * FROM tasks WHERE id = ?")
+        .bind(&task_id)
+        .fetch_one(&state.0)
+        .await?;
+
+    Ok(updated)
+}
+
+/// 删除任务
+#[tauri::command]
+pub async fn delete_task(task_id: String, state: State<'_, DbPool>) -> AppResult<()> {
+    sqlx::query("DELETE FROM tasks WHERE id = ?")
+        .bind(&task_id)
+        .execute(&state.0)
+        .await?;
+    Ok(())
+}
+
+/// 按日期范围查询任务（日历视图用）
+///
+/// PRD §4.2 模块五 & 分阶段计划 Sprint 3：
+/// - 返回日期范围内的所有任务，附带目标名称
+/// - 标记 is_overdue：plan_date < today 且 status IN ('pending','partial')
+/// - 按 plan_date, sort_order 排序
+#[tauri::command]
+pub async fn list_tasks_by_date_range(
+    start_date: String,
+    end_date: String,
+    state: State<'_, DbPool>,
+) -> AppResult<Vec<CalendarTask>> {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    let mut tasks: Vec<CalendarTask> = sqlx::query_as(
+        "SELECT t.id, t.goal_id, g.name as goal_name, t.stage_id, t.name,
+                t.plan_date, t.plan_qty, t.actual_qty, t.unit, t.status, t.source,
+                0 as is_overdue
+         FROM tasks t
+         JOIN goals g ON t.goal_id = g.id
+         WHERE t.plan_date IS NOT NULL
+           AND t.plan_date >= ? AND t.plan_date <= ?
+         ORDER BY t.plan_date, t.sort_order",
+    )
+    .bind(&start_date)
+    .bind(&end_date)
+    .fetch_all(&state.0)
+    .await?;
+
+    // 在应用层计算 is_overdue（SQLite 不便直接返回布尔）
+    for task in &mut tasks {
+        if let Some(plan_date) = &task.plan_date {
+            if plan_date.as_str() < today.as_str()
+                && (task.status == "pending" || task.status == "partial")
+            {
+                task.is_overdue = true;
+            }
+        }
+    }
 
     Ok(tasks)
 }
