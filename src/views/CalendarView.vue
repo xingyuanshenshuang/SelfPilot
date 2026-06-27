@@ -292,13 +292,19 @@ async function quickSkip(task: CalendarTask) {
       <div
         class="grid grid-cols-7 gap-1 text-center text-xs text-gray-500 mb-1"
       >
-        <div v-for="d in weekDays" :key="d" class="py-1">{{ d }}</div>
+        <div
+          v-for="d in weekDays"
+          :key="d"
+          class="flex items-center justify-center py-1"
+        >
+          {{ d }}
+        </div>
       </div>
       <div class="grid grid-cols-7 gap-1">
         <div
           v-for="day in monthGrid"
           :key="day.toISOString()"
-          class="calendar-cell min-h-[88px] p-1.5 rounded border cursor-pointer transition-colors"
+          class="calendar-cell flex flex-col items-center justify-center min-h-[88px] p-1.5 rounded border cursor-pointer transition-colors"
           :class="{
             'bg-gray-50': !isSameMonth(day, currentDate),
             'border-brand-500 border-2': isToday(day),
@@ -307,7 +313,7 @@ async function quickSkip(task: CalendarTask) {
           @click="selectDay(day)"
         >
           <div
-            class="text-right text-sm"
+            class="text-center text-sm font-semibold"
             :class="{
               'text-brand-600 font-bold': isToday(day),
               'text-gray-400': !isSameMonth(day, currentDate),
@@ -357,7 +363,7 @@ async function quickSkip(task: CalendarTask) {
           }"
         >
           <div
-            class="text-center text-sm font-medium pb-1 border-b"
+            class="flex items-center justify-center text-center text-sm font-medium pb-1 border-b"
             :class="{ 'text-brand-600': isToday(day) }"
           >
             {{ format(day, "E d", { locale: zhCN }) }}
@@ -381,7 +387,7 @@ async function quickSkip(task: CalendarTask) {
             </div>
             <div
               v-if="getTasksOfDay(day).length === 0"
-              class="text-[10px] text-gray-300 text-center pt-2"
+              class="flex items-center justify-center text-[10px] text-gray-300 pt-2"
             >
               无
             </div>
